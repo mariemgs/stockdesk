@@ -7,7 +7,7 @@
 #   docker buildx imagetools inspect node:24-bookworm-slim
 # then use:  FROM node:24-bookworm-slim@sha256:<digest>
 # Dependabot (see .github/dependabot.yml) keeps the digest up to date afterwards.
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 
 ENV NODE_ENV=production
 WORKDIR /app
