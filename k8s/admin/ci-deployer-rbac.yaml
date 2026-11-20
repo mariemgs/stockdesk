@@ -1,0 +1,61 @@
+# Applied once by a cluster administrator (not by CI).
+# Identity used by the GitHub Actions deploy job: limited to namespace "stockdesk",
+# can only update the Deployment and its ConfigMap. No direct right on Secrets,
+# ServiceAccounts, Services, NetworkPolicies or other namespaces.
+#
+# LIMIT (see RISKS.md #4b): whoever can change the Deployment can change its pod
+# template, e.g. run another image that mounts Secret "stockdesk-env". So holding this
+# identity indirectly gives access to the Secrets of this namespace. Mitigations: the
+# deploy job needs a human approval, Pod Security "restricted" blocks privileged/host
+# pods, NetworkPolicies limit egress. Future work: an admission policy that only
+# accepts our registry's images by digest and the "stockdesk" ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: stockdesk
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deployer
+  namespace: stockdesk
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: stockdesk
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: stockdesk
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ci-deployer
+---
+# Token for the CI kubeconfig. Revocable at any time by deleting this Secret
+# (unlike a client certificate, which stays valid until it expires).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-deployer-token
+  namespace: stockdesk
+  annotations:
+    kubernetes.io/service-account.name: ci-deployer
+type: kubernetes.io/service-account-token

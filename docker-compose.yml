@@ -1,26 +1,48 @@
-# Local and test-server stack for StockDesk.
+# Local development stack only. Test servers and anything shared run on
+# Kubernetes (k8s/), never with this file.
+#
+#   cp .env.example .env      # then edit the values; .env is git-ignored
+#   docker compose up --build
+#
+# Debugger: docker compose -f docker-compose.yml -f docker-compose.debug.yml up
 services:
   app:
     build: .
+    # Published on the loopback interface only: not reachable from the network.
     ports:
-      - "3000:3000"
-      - "9229:9229"
+      - "127.0.0.1:3000:3000"
     env_file: .env
     depends_on:
-      - db
-    restart: always
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - "no-new-privileges:true"
+    init: true
+    restart: unless-stopped
 
   db:
-    image: postgres:latest
+    # Major version pinned instead of "latest". TODO verify: align with the
+    # production PostgreSQL major version and pin the digest.
+    image: postgres:17-bookworm
     environment:
-      POSTGRES_USER: stockdesk
-      POSTGRES_PASSWORD: Sd-prod-2024-Zk93qP
+      POSTGRES_USER: ${DB_USER:-stockdesk}
+      # Read from .env; compose stops with this message if it is missing.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: stockdesk
-    ports:
-      - "5432:5432"
+    # No published port: the app reaches the database on the compose network.
+    # For a local psql: docker compose exec db psql -U stockdesk
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d stockdesk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - dbdata:/var/lib/postgresql/data
-    restart: always
+    restart: unless-stopped
 
 volumes:
   dbdata:

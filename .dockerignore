@@ -1,0 +1,19 @@
+# Keep the build context minimal: nothing secret or irrelevant goes into the image.
+.git
+.github
+.env
+.env.*
+!.env.example
+k8s
+test
+node_modules
+npm-debug.log
+*.log
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
+.gitleaks.toml
+.tools
+.deploy
+.trivyignore.yaml

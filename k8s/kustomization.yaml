@@ -1,0 +1,7 @@
+# What the CI deploy job is allowed to apply, in namespace "stockdesk".
+# Deliberately excludes k8s/admin/ (namespace, RBAC, Secret, Service, NetworkPolicies).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: stockdesk
+resources:
+  - deployment.yaml

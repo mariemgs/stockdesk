@@ -1,0 +1,12 @@
+# Applied once by a cluster administrator (not by CI).
+# Pod Security Admission "restricted": the API server refuses pods that run as
+# root, keep capabilities, allow privilege escalation, etc.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stockdesk
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

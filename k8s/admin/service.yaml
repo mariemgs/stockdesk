@@ -1,0 +1,28 @@
+# Applied by a cluster administrator (not by CI): how StockDesk is exposed on the
+# network is a deliberate decision, so the CI identity has no right on Services.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stockdesk
+  namespace: stockdesk
+  labels:
+    app: stockdesk
+spec:
+  # Still a LoadBalancer so that today's internal users keep access, but:
+  #  - only port 80 -> 3000; the debugger port is gone;
+  #  - restricted to known source ranges.
+  # NOT DEPLOYABLE AS WRITTEN: 203.0.113.0/24 is a documentation range (RFC 5737),
+  # it would block every real user. Replace it with Corvane's office / VPN egress
+  # ranges before applying, or switch to ClusterIP behind an Ingress. Enforcement of
+  # loadBalancerSourceRanges depends on the cloud provider: to verify on this cluster.
+  # This is NOT the entry point for external suppliers: see THREAT-NOTE.md.
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+    - 203.0.113.0/24
+  selector:
+    app: stockdesk
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,10 @@
+# Opt-in debugging override, local machine only:
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up
+# The inspector listens on 0.0.0.0 inside the container but is published on the
+# host loopback only. Never use this on a shared server: the Node inspector
+# gives full code execution to whoever can reach it.
+services:
+  app:
+    command: ["node", "--inspect=0.0.0.0:9229", "src/server.js"]
+    ports:
+      - "127.0.0.1:9229:9229"
