@@ -1,0 +1,23 @@
+# Automatic dependency updates (free, built into GitHub): the pinned actions and the
+# Docker base image. npm and compose can be added when they matter (no npm dependency today).
+# Pull requests opened by Dependabot run the same "ci" workflow, without secrets.
+# cooldown: wait a few days before proposing a new release, so that a hijacked
+# release (like the trivy-action tags in March 2026, fixed within a day) is
+# usually caught by others first.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"   # keeps the SHA pins in ci.yml up to date
+    directory: "/"
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: "docker"           # base image tag/digest in the Dockerfile
+    directory: "/"
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: "weekly"

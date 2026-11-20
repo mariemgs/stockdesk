@@ -1,2 +1,15 @@
 node_modules
 *.log
+
+# Local settings and secrets: never committed. Copy .env.example to .env.
+.env
+.env.*
+!.env.example
+
+# Kubernetes secrets are created in the cluster, never stored here (see README).
+k8s/**/secret*.yaml
+!k8s/admin/secret.example.yaml
+
+# CI working folders
+.tools/
+.deploy/

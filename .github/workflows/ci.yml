@@ -1,57 +1,242 @@
-name: build-and-deploy
+# StockDesk delivery pipeline.
+#
+#   pull_request (any author, any branch, forks included) -> test + static checks + build + image scan.
+#       Runs the PR's code WITHOUT any secret and with a read-only token.
+#   push to main (after review, see README "GitHub settings")  -> same checks, then
+#       publish (environment "registry") and deploy (environment "test-cluster", manual approval).
+#
+# Principles: secrets only exist in the two last jobs, which run no code from the PR
+# and no third-party tool; every action is pinned to a full commit SHA; every
+# downloaded tool is checked against a SHA-256; the image is deployed by digest.
+name: ci
 
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches: ["**"]
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+    branches: [main]
 
-permissions: write-all
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: registry.corvane.example
-  IMAGE: stockdesk
-  DEPLOY_TOKEN: cvn_deploy_9f3a1c77e0b24d58a6c1e3b0
+  IMAGE_NAME: stockdesk
+  TOOLS_DIR: ${{ github.workspace }}/.tools
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: latest
+          node-version: "24"
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install dependencies (lockfile only, no install scripts)
+        run: npm ci --ignore-scripts
 
       - name: Run tests
-        run: npm test || true
+        # A failing test now fails the pipeline (the old "|| true" is gone).
+        run: npm test
 
-      - name: Announce build
-        run: echo "Building '${{ github.event.pull_request.title }}' for ${{ github.actor }}"
+  static-checks:
+    name: Secrets, Dockerfile, workflow and manifest checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # gitleaks needs the commits of the range below
 
-      - name: Log in to the registry
+      - name: Install pinned tools (SHA-256 verified)
+        run: bash .github/scripts/install-tools.sh "$TOOLS_DIR" gitleaks kubeconform actionlint trivy
+
+      - name: Secret scan - files as they are now
+        run: '"$TOOLS_DIR/gitleaks" dir . --config .gitleaks.toml --redact --no-banner'
+
+      - name: Secret scan - commits added by this PR / push
+        env:
+          # Event data goes through env, never inline in the script (no injection).
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          echo "Logging in with token $DEPLOY_TOKEN"
-          echo "$DEPLOY_TOKEN" | docker login $REGISTRY -u ci-bot --password-stdin
+          # Normal push / PR: every commit between BASE and HEAD.
+          # First push (BASE is all zeros) or rewritten history (BASE no longer exists):
+          # all history reachable from HEAD (checkout uses fetch-depth: 0).
+          # While the history still contains the original exposed values, that full scan
+          # fails on purpose: it turns green once the history is cleaned (RISKS.md, step 7).
+          if [[ "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            opts="$HEAD_SHA"
+          else
+            opts="$BASE_SHA..$HEAD_SHA"
+          fi
+          "$TOOLS_DIR/gitleaks" git . --config .gitleaks.toml --redact --no-banner --log-opts="$opts"
 
-      - name: Build and push the image
+      - name: Lint workflows
+        run: '"$TOOLS_DIR/actionlint" -color'
+
+      - name: Validate Kubernetes manifests against the API schemas
+        run: '"$TOOLS_DIR/kubeconform" -strict -summary -skip Kustomization k8s/*.yaml k8s/admin/*.yaml'
+
+      # Also covers the Dockerfile (root user, unpinned base image...): no separate Dockerfile linter.
+      - name: Misconfiguration scan (Dockerfile, Kubernetes manifests)
+        run: '"$TOOLS_DIR/trivy" config --ignorefile .trivyignore.yaml --exit-code 1 --severity MEDIUM,HIGH,CRITICAL .'
+
+  build:
+    name: Build and scan image
+    needs: [test, static-checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      archive-sha256: ${{ steps.save.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image (not pushed from this job)
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/$IMAGE:latest .
-          docker push $REGISTRY/$IMAGE:latest
+          docker build \
+            --label "org.opencontainers.image.revision=$GIT_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$IMAGE_NAME:$GIT_SHA" .
+
+      - name: Save image archive
+        id: save
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          docker save -o image.tar "$IMAGE_NAME:$GIT_SHA"
+          echo "sha256=$(sha256sum image.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Trivy (SHA-256 verified)
+        run: bash .github/scripts/install-tools.sh "$TOOLS_DIR" trivy
+
+      - name: Vulnerability scan (fails on fixable HIGH/CRITICAL)
+        run: '"$TOOLS_DIR/trivy" image --input image.tar --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed'
+
+      - name: Generate SBOM (CycloneDX)
+        run: '"$TOOLS_DIR/trivy" image --input image.tar --format cyclonedx --output sbom.cdx.json'
+
+      - name: Upload image archive and SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ github.sha }}
+          path: |
+            image.tar
+            sbom.cdx.json
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Push image to the registry
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Environment restricted to the main branch; holds REGISTRY_USER / REGISTRY_TOKEN.
+    environment: registry
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      # No checkout: this job runs no code from the repository.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ github.sha }}
+
+      - name: Check the archive is the one the build job scanned
+        env:
+          EXPECTED: ${{ needs.build.outputs.archive-sha256 }}
+        run: echo "$EXPECTED  image.tar" | sha256sum --check --strict
+
+      - name: Log in, push by commit SHA, record the digest
+        id: push
+        env:
+          GIT_SHA: ${{ github.sha }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          docker load -i image.tar
+          ref="$REGISTRY/$IMAGE_NAME:$GIT_SHA"
+          docker tag "$IMAGE_NAME:$GIT_SHA" "$ref"
+          printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+          docker push "$ref"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref" | cut -d@ -f2)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "unexpected digest: $digest" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed $ref@$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out
+        if: always()
+        run: docker logout "$REGISTRY" || true
 
   deploy:
-    needs: build
-    runs-on: ubuntu-latest
+    name: Deploy to the shared test cluster
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Environment with required reviewers and a main-only branch rule; holds KUBECONFIG
+    # (namespace-scoped "ci-deployer" identity, see k8s/admin/ci-deployer-rbac.yaml).
+    environment: test-cluster
+    concurrency:
+      group: deploy-test-cluster
+      cancel-in-progress: false
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Deploy to the cluster
-        uses: corvane-labs/k8s-deploy-action@main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          kubeconfig: ${{ secrets.KUBECONFIG }}
-          manifests: k8s/
+          persist-credentials: false
+
+      - name: Pin the image by digest
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "bad digest" >&2; exit 1; }
+          mkdir -p .deploy
+          cat > .deploy/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - ../k8s
+          images:
+            - name: $REGISTRY/$IMAGE_NAME
+              digest: $DIGEST
+          EOF
+
+      - name: Apply and wait for the rollout
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          printf '%s' "$KUBECONFIG_DATA" > "$KUBECONFIG"
+          # kubectl comes with the runner image (TODO verify its version matches the cluster).
+          kubectl kustomize .deploy | grep -E '^\s+image:'
+          kubectl apply -k .deploy
+          kubectl -n stockdesk rollout status deployment/stockdesk --timeout=180s
+
+      - name: Remove the kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"

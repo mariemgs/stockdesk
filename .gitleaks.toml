@@ -1,0 +1,21 @@
+# gitleaks configuration: default rules + Corvane-specific token formats.
+# The default rules did NOT detect the deploy token that was hard-coded in the
+# old ci.yml (prefix "cvn_deploy_"): these custom rules close that gap.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "corvane-deploy-token"
+description = "Corvane registry/deploy token"
+regex = '''cvn_deploy_[A-Za-z0-9]{16,}'''
+keywords = ["cvn_deploy_"]
+
+[[rules]]
+id = "stockdesk-api-key"
+description = "StockDesk API key"
+regex = '''sdk_(live|test)_[A-Za-z0-9]{16,}'''
+keywords = ["sdk_live_", "sdk_test_"]
+
+[allowlist]
+description = "Documented placeholders"
+regexes = ['''example-not-a-real-[a-z]+''', '''change-me-local-only''']

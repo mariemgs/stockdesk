@@ -1,0 +1,14 @@
+# Trivy findings reviewed and accepted. Every entry says why; review them at each tool update.
+misconfigurations:
+  - id: KSV-0048
+    paths: ["k8s/admin/ci-deployer-rbac.yaml"]
+    statement: "The CI deployer must update the Deployment: that is its job. Scoped to namespace stockdesk, behind a GitHub environment with required reviewers."
+  - id: KSV-0049
+    paths: ["k8s/admin/ci-deployer-rbac.yaml"]
+    statement: "The CI deployer manages the non-secret ConfigMap stockdesk-config. It has no access to Secrets."
+  - id: KSV-01010
+    paths: ["k8s/deployment.yaml"]
+    statement: "False positive: the keys PORT and DB_PORT contain port numbers, not secrets."
+  - id: KSV-0125
+    paths: ["k8s/deployment.yaml"]
+    statement: "registry.corvane.example is Corvane's own registry, not in Trivy's default trusted list."
