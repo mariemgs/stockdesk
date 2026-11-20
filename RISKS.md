@@ -20,11 +20,22 @@ Critical (exploitable now with little effort, large impact), High, Medium, Low.
   wrong costs one rotation; assuming "test only" and being wrong costs the data.
 - **The KUBECONFIG secret has cluster-admin rights** on the shared cluster (nobody checked; the contractor who
   created it has left). I assume the worst until a cluster admin checks.
-- **The LoadBalancer Service may be reachable from the Internet** (nobody checked).
+- **Who uses StockDesk today (confirmed):** staff from the office network and through the VPN, via the
+  LoadBalancer address, and one internal script with the shared API key. **Whether that address is also reachable
+  from the Internet was never checked:** I assume it may be.
+- **The compose stack is still running on a shared developers' test server (confirmed).** Its live port mappings
+  were not checked: I assume it runs the original `docker-compose.yml` (9229 and 5432 published on all interfaces)
+  and, since its other users are not documented, that anyone on that network can reach them.
 - **Anyone of the ~40 readers can open a pull request** (confirmed), including from a fork inside the
   organisation. Their accounts can be phished; the contractor's account is outside Corvane's control.
-- `corvane-labs/k8s-deploy-action` is **not** clearly controlled by Corvane today (different organisation name,
-  set up by the departed contractor). I treat it as third-party code.
+- `corvane-labs/k8s-deploy-action` lives in Corvane's GitHub organisation. **Nobody removed the departed
+  contractor's access** (confirmed); his actual permissions were not checked, so **I assume he still has write
+  access**, and treat the action as untrusted until his permissions are verified and removed and its commit history
+  reviewed.
+- **Suppliers (not decided yet; my recommendation and assumption):** suppliers get **read-only** access, **one key
+  per supplier**, ideally limited to their own products; stock adjustments stay internal (staff and the internal
+  script). If suppliers were also allowed to adjust stock with today's single shared key, risk 16 would become
+  Critical and the first thing to fix before opening (see "How the supplier decision changes the ranking").
 - Suppliers will reach StockDesk through a separate environment with TLS in front (my recommendation, see
   THREAT-NOTE.md), **not** through the shared test cluster.
 
@@ -34,9 +45,10 @@ Critical (exploitable now with little effort, large impact), High, Medium, Low.
 |---|---|---|---|---|
 | 1 | Secrets committed in clear and spread (repo, history, CI logs, image layers) | `.env`, `k8s/secret.yaml`, `docker-compose.yml`, `ci.yml` (`DEPLOY_TOKEN`) | Critical | **Reduced** (removed, scan added) — **rotation left to owners**, see runbook |
 | 2 | "Pwn request": PR code runs with secrets and a `write-all` token, and gets built, pushed and deployed | `ci.yml`: `pull_request_target` + checkout of PR head, `permissions: write-all`, env `DEPLOY_TOKEN`, deploy without condition | Critical | **Fixed** |
-| 3 | Node.js inspector open to the network = remote code execution | `Dockerfile` `--inspect=0.0.0.0:9229`, `EXPOSE 9229`; Service port 9229 on a LoadBalancer; compose `9229:9229` | Critical | **Fixed** |
+| 3 | Node.js inspector open to the network = remote code execution | `Dockerfile` `--inspect=0.0.0.0:9229`, `EXPOSE 9229`; Service port 9229 on a LoadBalancer; compose `9229:9229` | Critical | **Fixed** in the files; the running copies are 3b (cluster) and 3c (test server) |
 | 3b | The old deployment keeps running in namespace `default` after the new one is deployed in `stockdesk`: its process still starts with `--inspect=0.0.0.0:9229` (removing the port from its Service does not stop the debugger, reachable from inside the cluster), it still accepts the leaked API key and DB password, and clients still use its IP | cluster | Critical | **Left** to cluster admin: runbook step 0 (disable the debugger in the old pod now) and step 4 (planned cutover, then removal); README checklist |
-| 4 | Cluster credentials of unknown (likely admin) scope handed to an unpinned third-party action on `@main` | `ci.yml` deploy job, `secrets.KUBECONFIG` | Critical | **Fixed** in pipeline, **Reduced** overall (old credential must be revoked) |
+| 3c | The compose stack is **confirmed running** on the shared developers' test server. If it uses the original file (assumed; its live port mappings and reachability are **to verify**), it publishes the Node inspector (9229) and PostgreSQL (5432, with the leaked password) on all interfaces, with `restart: always`; its other users are not documented | shared test server | Critical | **Left** to the test-server admin: runbook step 0 (stop it or unpublish both ports now), step 4a (its database password) |
+| 4 | Cluster credentials of unknown (likely admin) scope handed to an action on `@main` that the **departed contractor may still push to** (his access was never removed; write access assumed until verified) | `ci.yml` deploy job, `secrets.KUBECONFIG`, `corvane-labs/k8s-deploy-action` | Critical | **Fixed** in pipeline (action no longer used), **Reduced** overall (old credential must be revoked, contractor's access removed, the action's history audited) |
 | 4b | The CI deployer can read the namespace Secrets **indirectly**: it has no `get secrets`, but it can change the Deployment's pod template (another image, `envFrom: secretRef: stockdesk-env`) and run code that reads them | `k8s/admin/ci-deployer-rbac.yaml` | Medium (high impact, needs the deploy credential or an approved malicious deploy) | **Reduced**: human approval on the deploy job; ServiceAccount verbs removed; Pod Security "restricted" blocks privileged / host pods; NetworkPolicies limit egress (5432 still open to any address until the DB address is known). **Left**: admission policy (e.g. built-in ValidatingAdmissionPolicy, or Kyverno) allowing only `registry.corvane.example` images by digest and the `stockdesk` ServiceAccount |
 | 5 | Unknown, unverified code in production: `:latest` everywhere, tests that cannot fail, no scan, any branch deploys | `ci.yml` (`npm test \|\| true`, `push: "**"`), `Dockerfile` `node:latest`, deployment `:latest` + `IfNotPresent` | High | **Fixed** |
 | 6 | Secrets baked into the image (`COPY . .` with no `.dockerignore`: `.env`, `k8s/secret.yaml`, `.git`) | `Dockerfile` | High | **Fixed** for new images; **old images left** (delete, runbook step 6) |
@@ -45,12 +57,12 @@ Critical (exploitable now with little effort, large impact), High, Medium, Low.
 | 9 | Container runs as root, writable filesystem, default namespace, SA token mounted, no limits | `Dockerfile`, `k8s/deployment.yaml` | High | **Fixed** |
 | 10 | Service exposure unknown, plain HTTP, API key sent in clear | `k8s` Service `type: LoadBalancer` | High | **Reduced** (source ranges, 1 port, no TLS yet) |
 | 11 | No GitHub guard-rails: no branch protection, no CODEOWNERS, no environment approval | GitHub settings (outside the repo) | High | **Reduced** (environments with approval in the pipeline) — branch protection and mandatory review of `.github/`, `k8s/`, `Dockerfile` (e.g. CODEOWNERS with a real team) **left** to the org admin |
-| 12 | Departed contractor may still hold access (GitHub, registry, cluster, `corvane-labs`) | Organisation | High | **Left** (runbook step 0) |
+| 12 | Departed contractor's access was **never revoked**: for `corvane-labs/k8s-deploy-action`, write access is **assumed** until his permissions are verified; GitHub org, registry and cluster access unknown | Organisation | High | **Left** (runbook step 0) |
 | 13 | No network isolation in a shared cluster (lateral movement, free egress) | `k8s/` | Medium | **Reduced**: default deny + allow-list. **Remaining**: egress on TCP 5432 is allowed to *any* address (the rule fixes the port, not the server) until the database location is known; enforcement depends on the CNI (unverified) |
 | 13b | Moving the app to namespace `stockdesk` would break `DB_HOST=db` (a short DNS name resolves in the pod's own namespace) | `k8s/deployment.yaml` ConfigMap | High (availability: the pod would never become ready) | **Reduced**: `DB_HOST=db.default.svc`, same target as before **if** the database is the Service `db` in `default` (the repo does not define it). Unverified: that Service exists, and no NetworkPolicy on the database side blocks namespace `stockdesk`. Checks in the README cluster checklist |
 | 14 | Liveness probe depends on the database, with a timeout equal to the DB check → restart loops | `k8s/deployment.yaml` | Medium (availability) | **Fixed** (`/livez` + readiness on `/health`) |
-| 15 | Dev stack used on a "test server": Postgres published on all interfaces with the known password, `postgres:latest`, debugger | `docker-compose.yml` | Medium | **Fixed** in the file; **left**: check whether a test server still runs it |
-| 16 | One shared API key for every writer, no per-supplier identity, no rate limit, no audit trail; product list readable without auth | `src/server.js` (design) | Medium now, **High once suppliers connect** | **Left** (recommendation) |
+| 15 | The compose file itself: Postgres and debugger published on all interfaces, password in clear, `postgres:latest`, used beyond local development | `docker-compose.yml` | Medium | **Fixed** in the file (local only, `127.0.0.1`, debugger opt-in); the running copy is 3c |
+| 16 | Supplier access: one shared API key for every writer, no per-supplier identity, no rate limit, no audit trail; product list readable without authentication. Not decided yet; **assumption below** | `src/server.js` (design) | **High before opening** (Critical if suppliers may adjust stock with a shared key) | **Left**: recommendation below and in THREAT-NOTE.md; must be done before suppliers connect |
 | 17 | Unbounded request body (memory exhaustion) | `src/server.js` POST adjust | Medium | **Fixed** (16 KiB, 413) |
 | 18 | Scanners and actions are themselves a supply-chain risk | `ci.yml` | Medium | **Reduced** (SHA pins, SHA-256 checks, no secrets where they run) |
 | 19 | No image signature / admission control: the cluster runs any image it is given | cluster | Medium | **Left** |
@@ -71,16 +83,31 @@ Critical (exploitable now with little effort, large impact), High, Medium, Low.
    built, pushed as `latest` and deployed — with no review at all. It would also re-leak any rotated secret, so it
    must be closed *before* rotation (runbook step 1).
 3. **Inspector (3)** needs no account at all, only network reach, and gives full code execution in the pod (read
-   `process.env` → DB password and API key). If the LoadBalancer is public, Internet scanners look for 9229. I rank
-   it after 2 only because reachability is unknown, while 2 is certain for 40 people.
-4. **KUBECONFIG + `@main` action (4)**: whoever controls `corvane-labs/k8s-deploy-action` (possibly the departed
-   contractor) can change it at any time and receive the kubeconfig on the next push — likely admin of a cluster
-   *shared with other teams*. Impact is the largest of all; it is fourth because exploitation needs control of that
-   repository, which is less likely than 2 or 3.
+   `process.env` → DB password and API key). If the LoadBalancer is public, Internet scanners look for 9229. It is
+   **likely** on one network already: the compose stack is confirmed running on the shared developers' test server,
+   and if it uses the original file it exposes the same debugger (3c). I rank it after 2 only because 2 is open to 40 people including an outsider.
+4. **KUBECONFIG + `@main` action (4)**: whoever can push to `corvane-labs/k8s-deploy-action` — possibly
+   including the departed contractor, whose access was never revoked — can change it at any time and receive the kubeconfig on the next
+   push: likely admin of a cluster *shared with other teams*. Impact is the largest of all. That unrevoked access raises
+   its likelihood; it stays fourth only because it depends on one person's intent, while 2 and 3 are open to many.
+   Other Corvane repositories may use the same action: they must be checked too.
 5. **Unverified images (5)**: not an attack by itself, but it is what turns 1, 2 and 4 into silent compromise:
    with `:latest` + `IfNotPresent` nobody can say which code runs, a poisoned `latest` is picked up on the next pod
    restart, and failing tests never stop a deploy. Fixing it (deploy by digest from a gated pipeline) is also what
    makes rollback and audit possible.
+
+## How the supplier decision changes the ranking
+
+The CTO has not decided what suppliers may do. My recommendation: **read-only, one revocable key per supplier**,
+limited to the supplier's own products if that matters commercially, behind TLS; adjustments stay internal.
+- **Read-only, per-supplier keys (recommended):** risk 16 stays **High** and is a prerequisite for opening, not an
+  emergency: a supplier could only read, and one leaked key is revoked without affecting the others. The top five
+  do not change.
+- **Suppliers may also adjust stock:** with today's single shared key, any supplier (or anyone holding one
+  supplier's copy) could change everyone's stock with no trace. Risk 16 becomes **Critical** and the first item to
+  fix before opening: per-supplier keys, each limited to its own products, plus an audit log of every adjustment.
+- **Either way**, today's unauthenticated `GET /api/products` exposes all stock levels to anyone who reaches the
+  API: it must require a key before any outside access.
 
 ## What I changed (by risk)
 
@@ -94,7 +121,7 @@ Critical (exploitable now with little effort, large impact), High, Medium, Low.
   in GitHub environments (`registry`, `test-cluster` with required reviewers), and run no code from the PR.
 - **3**: no `--inspect` in the image, no 9229 in `EXPOSE`, Deployment or Service; debugging is an opt-in compose
   override bound to `127.0.0.1`.
-- **4**: third-party action removed; `kubectl apply -k` with a kubeconfig written with `umask 077` and deleted
+- **4**: the `corvane-labs` deploy action is no longer used; `kubectl apply -k` with a kubeconfig written with `umask 077` and deleted
   after; new identity `ci-deployer` limited to namespace `stockdesk` (Deployment and ConfigMap only; no direct
   right on Secrets, ServiceAccounts, Services or NetworkPolicies) in `k8s/admin/ci-deployer-rbac.yaml`, token
   revocable by deleting a Secret. This is much smaller than cluster-admin, but **not** "no access to Secrets":
@@ -134,14 +161,14 @@ would read the new Secret. History is cleaned **last**, because rewriting it doe
 
 | Step | Who | What |
 |---|---|---|
-| 0. Contain | CTO + GitHub org admin + cluster admin | Treat it as an incident (write down times and actions). **Disable GitHub Actions on the repository** until step 1 is merged (stops the pwn request and the `@main` action). Review open PRs and recent workflow runs. **Cluster admin, old copy in `default`:** remove port 9229 from its Service **and** restart it without the debugger (override the command to `node src/server.js`; commands in the README checklist, step 0), then check that `--inspect` is gone from the running process. Removing the Service port alone leaves the debugger reachable from inside the cluster. Cost: a short interruption, and the in-memory stock resets. Remove the departed contractor from the org, outside collaborators, deploy keys, GitHub Apps and PATs they created; check who controls the `corvane-labs` organisation. |
+| 0. Contain | CTO + GitHub org admin + cluster admin | Treat it as an incident (write down times and actions). **Disable GitHub Actions on the repository** until step 1 is merged (stops the pwn request and the `@main` action). Review open PRs and recent workflow runs. **Cluster admin, old copy in `default`:** remove port 9229 from its Service **and** restart it without the debugger (override the command to `node src/server.js`; commands in the README checklist, step 0), then check that `--inspect` is gone from the running process. Removing the Service port alone leaves the debugger reachable from inside the cluster. Cost: a short interruption, and the in-memory stock resets. **Test-server admin, compose stack (confirmed running):** `docker compose ps` shows which ports are published, not who can reach them; also test from another developer machine, from the VPN and from outside Corvane (e.g. `nc -zv <server> 9229` and `5432`). Then stop it (`docker compose down`) or at least remove the published 9229 and 5432 ports now; developers then run it locally with the new `docker-compose.yml` (bound to `127.0.0.1`). Remove the departed contractor from the org, outside collaborators, deploy keys, GitHub Apps and PATs they created, **including any access to `corvane-labs/k8s-deploy-action`** (never revoked; verify what he can still do there); review that repository's commits since he left, and list other repositories that use the action. |
 | 1. Merge the new pipeline | GitHub org admin + one reviewer | Branch protection on `main` (PR + 1 review + required checks `Unit tests`, `Secrets, Dockerfile…`, `Build and scan image`); default workflow token = read-only; approval required for fork pull request workflows; create environments `registry` (branch `main` only) and `test-cluster` (branch `main`, required reviewers). Delete repository-level `KUBECONFIG`. Then re-enable Actions. |
 | 2. KUBECONFIG | Cluster admin | Find what it is (`kubectl auth can-i --list` with it). **Token** → delete the token / ServiceAccount. **Client certificate** → it cannot be revoked: remove its RoleBindings/ClusterRoleBindings; if its group is `system:masters`, bindings cannot be removed and the cluster CA must be rotated (plan it with the other teams of the shared cluster). Apply `k8s/admin/` (namespace, `ci-deployer`, Service, NetworkPolicies), build a kubeconfig from `ci-deployer-token`, store it as `KUBECONFIG` in environment `test-cluster`. Look for anything unexpected: new (Cluster)RoleBindings, pods/DaemonSets in any namespace, recently created ServiceAccounts. |
 | 3. Registry token (`DEPLOY_TOKEN`) | Registry admin | Revoke `cvn_deploy_…`. Create a robot account that can only push `stockdesk`, store it as `REGISTRY_USER` / `REGISTRY_TOKEN` in environment `registry`. Review push history since the token was created; turn on tag immutability if the registry supports it. |
 | 4. Decide the timing | **CTO** | The old deployment uses the **same** DB password and API key as the leak. Revoking them breaks it at once, so this is a choice between containment and availability. **Planned (default):** keep the old values valid for a few hours, do 4a–4d the same day, revoke at the cutover. **Emergency** (signs of misuse in step 2/3/5, or the DB is reachable from outside): revoke now and accept an outage until 4b is done. Write the decision down. |
-| 4a. Prepare new values | DB admin + StockDesk owner + cluster admin | Check **where** the DB password is used (prod DB? test DB? reused elsewhere? the ops wiki it came from). For the database, prefer a **second role** (e.g. `stockdesk_app`, same grants, new random password; set `DB_USER` in the ConfigMap): old and new run side by side and the old one is closed at the cutover with no outage. If a second role is not possible, the password change itself happens at 4d. New API key: `openssl rand -hex 32`. Create the Secret `stockdesk-env` in `stockdesk` with the **new** values only (command in `k8s/admin/secret.example.yaml`). Remove the values from the ops wiki. |
+| 4a. Prepare new values | DB admin + StockDesk owner + cluster admin | Check **where** the DB password is used (prod DB? test DB? the Postgres of the compose stack on the shared test server? reused elsewhere? the ops wiki it came from). For the database, prefer a **second role** (e.g. `stockdesk_app`, same grants, new random password; set `DB_USER` in the ConfigMap): old and new run side by side and the old one is closed at the cutover with no outage. If a second role is not possible, the password change itself happens at 4d. New API key: `openssl rand -hex 32`. Create the Secret `stockdesk-env` in `stockdesk` with the **new** values only (command in `k8s/admin/secret.example.yaml`). Remove the values from the ops wiki. |
 | 4b. Deploy and check the new version | Cluster admin | First deploy through the pipeline, then README checklist step 4 (pod ready, `/health` 200, allowed / refused networks, 9229 closed). |
-| 4c. Move the clients | StockDesk owner | Give every known client the new endpoint **and** the new API key, preferably through a stable DNS name Corvane controls (e.g. `stockdesk.internal.corvane.example` → new LoadBalancer), so the next change of IP is a DNS change. Scripts may have the old IP hard-coded: confirm each known client works on the new endpoint, then watch the old one (LoadBalancer metrics, or the old pod logs) until legitimate traffic stops. Nobody knows who has the old key: unknown users will appear as 401s on the new endpoint. |
+| 4c. Move the clients | StockDesk owner | Give every known client — staff on the office network and VPN, and **the internal script** that uses the shared API key — the new endpoint **and** the new API key, preferably through a stable DNS name Corvane controls (e.g. `stockdesk.internal.corvane.example` → new LoadBalancer), so the next change of IP is a DNS change. Scripts may have the old IP hard-coded: confirm each known client works on the new endpoint, then watch the old one (LoadBalancer metrics, or the old pod logs) until legitimate traffic stops. Nobody knows who has the old key: unknown users will appear as 401s on the new endpoint. |
 | 4d. Revoke and remove the old copy | DB admin + cluster admin | Revoke the old DB credential (`ALTER ROLE stockdesk NOLOGIN` if a second role was created, otherwise `ALTER ROLE stockdesk PASSWORD '…'` and update the new Secret, then `kubectl -n stockdesk rollout restart deployment/stockdesk`). Delete the old copy: `kubectl -n default delete deployment/stockdesk service/stockdesk secret/stockdesk-env`; the old API key disappears with it. Check PostgreSQL logs for connections from unknown addresses. Compare stock levels with a physical/ERP count: there is no audit log of adjustments. |
 | 5. Find old exposure | GitHub org admin | Delete old Actions run logs: `DEPLOY_TOKEN` was a plain env value, so it was **not masked** and was printed by `echo "Logging in with token $DEPLOY_TOKEN"`. Check the audit log for actions by `github-actions[bot]` (pushes, tags, releases, new workflows) made with the `write-all` token. |
 | 6. Old images | Registry admin | After the new image is deployed, delete every image built by the old pipeline: their layers contain `.env` and `k8s/secret.yaml`. |

@@ -112,20 +112,27 @@ kubectl -n default exec deploy/stockdesk -- cat /proc/1/cmdline   # must not con
 ```
 Cost: a short interruption, and the in-memory stock resets to its initial values.
 
+Also now, on the **shared test server**: the compose stack is confirmed running; if it uses the original file, the
+debugger (9229) and PostgreSQL (5432) are published. `docker compose ps` shows the published ports; to know who can
+reach them, test from another developer machine, from the VPN and from outside Corvane
+(`nc -zv <server> 9229`, same for `5432`; on Windows `Test-NetConnection <server> -Port 9229`). Then stop it
+(`docker compose down`) or remove those two ports (RISKS.md, step 0).
+
 **1. Find out before changing anything**
-- [ ] Who uses StockDesk today and from where: people through the LoadBalancer IP (which office / VPN ranges?),
-      scripts or systems using the API key.
+- [ ] Known users (confirmed): staff on the office network and the VPN, through the LoadBalancer address, and one
+      internal script with the shared API key. Get the office and VPN egress ranges and the script's host address.
+- [ ] Is the LoadBalancer address reachable from the Internet? (never checked) Try from a network outside Corvane.
 - [ ] Other ways in: `kubectl get svc,ingress -A -o wide | grep -i stockdesk` (NodePorts, Ingress routes).
 - [ ] Does the network plugin enforce NetworkPolicy? (e.g. Calico or Cilium do; some basic plugins do not.)
-- [ ] Where the database runs, and whether a `docker compose` copy runs on a test server.
+- [ ] Where the database runs.
       `DB_HOST` assumes the Service `db` in namespace `default`:
       - `kubectl -n default get svc db` must exist (if not, find the real address and change `DB_HOST`);
       - `kubectl -n default get networkpolicy`: a policy there may refuse connections from namespace `stockdesk`;
       - after the deploy, `/health` answering `200` proves the database is reachable from the new namespace.
 
 **2. Fill in the placeholders**
-- [ ] `k8s/admin/service.yaml` is **not deployable as written**: replace `203.0.113.0/24` (a documentation range) with the real ranges found in step 1, **or** switch to
-      `type: ClusterIP` if nobody outside the cluster needs direct access (then narrow the NetworkPolicy ingress).
+- [ ] `k8s/admin/service.yaml` is **not deployable as written**: replace `203.0.113.0/24` (a documentation range) with the office and VPN ranges and
+      the script's address found in step 1 (a `ClusterIP` would cut off these confirmed users).
 - [ ] `k8s/deployment.yaml`: set `DB_HOST` to the address found in step 1 if it is not `db.default.svc`.
 - [ ] `k8s/admin/networkpolicy.yaml`: restrict egress on 5432 to the database (examples in the file).
 
@@ -150,7 +157,7 @@ kubectl apply -f k8s/admin/service.yaml -f k8s/admin/networkpolicy.yaml
 - [ ] A POST to `/api/products/BOLT-M6/adjust` with the old API key returns 401.
 
 **5. Cut over, then remove the old copy** (only once step 4 passes; timing decided by the CTO, see RISKS.md step 4)
-- [ ] Give clients the new endpoint and API key, ideally via a DNS name Corvane controls pointing to the new
+- [ ] Give clients (office and VPN staff, the internal script) the new endpoint and API key, ideally via a DNS name Corvane controls pointing to the new
       LoadBalancer, so the next IP change is a DNS change.
 - [ ] Confirm each known client works on the new endpoint; watch the old one until legitimate traffic stops
       (scripts may have the old IP hard-coded).
